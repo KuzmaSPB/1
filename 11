@@ -1,1 +1,50 @@
+// AlarmStatusChanged queue handler
+AlarmStatusChanged(func (payload) {
+    var alarmKey := "{{.payload.UserID}}:{{.payload.AlarmID}}"
+    // Get last record from Redis
+    var lastInMemory := redis.HMGet(alarmKey, ["ChangedAt"])
+    // If new record is coming
+    if (!lastInMemory || ChangedAt > lastInMemory.ChangedAt) {
+        // AlarmId is unique, there is updating each new status coming 
+        redis.HMSet(alarmKey, [
+            "AlarmID", payload.AlarmID,
+            "Status", payload.Status,
+            "ChangedAt", payload.ChangedAt
+        ])
+        // Redis can't do queries. There is the index to get all alarm by user
+        redis.SAdd("{{.payload.UserID}}:INDEX", alarmKey)
+    }
+    ack(payload)
+})
+// SendAlarmDigest queue handler
+SendAlarmDigest(func (payload) {
+    // Getting all alarms by UserId
+    var keys := redis.SMembers("{{.payload.UserID}}:INDEX")
+    // Getting all alarm bodies by AlarmIds
+    var alarms := redis.Mget(keys)
 
+    slice.Sort(alarms, func(i, j) {
+        return alarms[i].ChangedAt < alarms[j].ChangedAt
+    })
+
+    // Filtering array by Status
+    // Mapping as array of objects {AlarmID, Status, ChangedAt}
+    var activeAlarms []Alarm
+    for i, alarm := range alarms {
+        // Is it new alarm?
+        var changedAt := redis.Get("{{.payload.UserID}}:{{.alarm.AlarmID}}:LATEST")
+        if (contains(["WARNING", "CRITICAL"], alarm) && alarm.ChangedAt > changedAt) {
+            activeAlarms = append(Alarm{alarm.AlarmID, alarm.Status, alarm.ChangedAt})
+        }
+    }
+
+    // If active alarms more then zero send to the Topic AlarmDigest
+    if (len(activeAlarms) > 0) {
+        AlarmDigest.Publish(Payload{payload.UserID, activeAlarms})
+        for i, alarm := range activeAlarms {
+            redis.Set("{{.payload.UserID}}:{{.alarm.AlarmID}}:LATEST", alarm.ChangedAt)
+        }
+    }
+
+    ack(payload)
+})
